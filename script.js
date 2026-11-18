@@ -728,11 +728,233 @@
     syncHorarioTrigger(selectedHorario());
   }
 
-  function buildContratoPdfWorker() {
-    const article = modalContrato
-      ? modalContrato.querySelector(".contract__text")
+  function cleanupPdfHost_(host) {
+    if (!host) return;
+    try {
+      if (host._pdfStyleEl && host._pdfStyleEl.parentNode) {
+        host._pdfStyleEl.parentNode.removeChild(host._pdfStyleEl);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    if (host.parentNode) host.parentNode.removeChild(host);
+  }
+
+  function waitTwoFrames_() {
+    return new Promise(function (resolve) {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(resolve);
+      });
+    });
+  }
+
+  function getHtml2Canvas_() {
+    if (typeof window.html2canvas === "function") return window.html2canvas;
+    throw new Error(
+      "html2canvas não disponível. Confira se o script CDN html2canvas carregou."
+    );
+  }
+
+  function getJsPDF_() {
+    if (window.jspdf && typeof window.jspdf.jsPDF === "function") {
+      return window.jspdf.jsPDF;
+    }
+    if (typeof window.jsPDF === "function") return window.jsPDF;
+    throw new Error(
+      "jsPDF não disponível. Confira se o script CDN jspdf carregou."
+    );
+  }
+
+  async function captureHostCanvasViaHtml2Pdf_(host, scale) {
+    if (typeof window.html2pdf !== "function") {
+      throw new Error("html2pdf também indisponível.");
+    }
+    var canvas = await window
+      .html2pdf()
+      .set({
+        html2canvas: {
+          scale: scale,
+          useCORS: true,
+          allowTaint: true,
+          backgroundColor: "#ffffff",
+          logging: false,
+          windowWidth: host.scrollWidth || 794,
+          windowHeight: host.scrollHeight || host.offsetHeight,
+        },
+      })
+      .from(host)
+      .toCanvas();
+    return canvas;
+  }
+
+  function countNonWhitePixels_(canvas, maxW, maxH) {
+    try {
+      var ctx = canvas.getContext("2d");
+      var w = Math.min(maxW || 80, canvas.width);
+      var h = Math.min(maxH || 80, canvas.height);
+      var data = ctx.getImageData(0, 0, w, h).data;
+      var nonWhite = 0;
+      for (var i = 0; i < data.length; i += 4) {
+        if (data[i] < 250 || data[i + 1] < 250 || data[i + 2] < 250) nonWhite++;
+      }
+      return nonWhite;
+    } catch (err) {
+      console.warn("[pdf-contrato] pixel sample failed", err);
+      return -1;
+    }
+  }
+
+  function canvasToMultiPagePdfDataUri_(canvas) {
+    var JsPDF = getJsPDF_();
+    var pdf = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    var pageW = pdf.internal.pageSize.getWidth();
+    var pageH = pdf.internal.pageSize.getHeight();
+    var margin = 10;
+    var usableW = pageW - margin * 2;
+    var usableH = pageH - margin * 2;
+    var imgW = usableW;
+    var imgH = (canvas.height * imgW) / canvas.width;
+    var imgData = canvas.toDataURL("image/jpeg", 0.95);
+
+    var heightLeft = imgH;
+    var y = margin;
+    pdf.addImage(imgData, "JPEG", margin, y, imgW, imgH);
+    heightLeft -= usableH;
+
+    while (heightLeft > 0.5) {
+      y = margin - (imgH - heightLeft);
+      pdf.addPage();
+      pdf.addImage(imgData, "JPEG", margin, y, imgW, imgH);
+      heightLeft -= usableH;
+    }
+
+    return pdf.output("datauristring");
+  }
+
+  async function captureHostCanvas_(host, scale) {
+    var canvas;
+    try {
+      var html2canvasFn = getHtml2Canvas_();
+      canvas = await html2canvasFn(host, {
+        scale: scale,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: "#ffffff",
+        logging: false,
+        windowWidth: host.scrollWidth || 794,
+        windowHeight: host.scrollHeight || host.offsetHeight,
+      });
+    } catch (err) {
+      console.warn(
+        "[pdf-contrato] html2canvas direto falhou, tentando html2pdf.toCanvas",
+        err
+      );
+      canvas = await captureHostCanvasViaHtml2Pdf_(host, scale);
+    }
+    var probe = canvas.toDataURL("image/jpeg", 0.5);
+    var nonWhite = countNonWhitePixels_(canvas, 80, 80);
+    console.info(
+      "[pdf-contrato] scale=",
+      scale,
+      "canvas=",
+      canvas.width,
+      "x",
+      canvas.height,
+      "dataUrlPrefix=",
+      probe.slice(0, 31),
+      "dataUrlLen=",
+      probe.length,
+      "nonWhite80x80=",
+      nonWhite
+    );
+    return { canvas: canvas, probe: probe, nonWhite: nonWhite };
+  }
+
+  async function captureContratoSplitPdf_(scratchHtml) {
+    var JsPDF = getJsPDF_();
+    var pdf = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    var margin = 10;
+    var pageW = pdf.internal.pageSize.getWidth();
+    var usableW = pageW - margin * 2;
+
+    function buildPartialHost(nodes) {
+      var host = document.createElement("div");
+      host.style.cssText =
+        "position:fixed;left:0;top:0;width:794px;padding:16px 20px;margin:0;background:#ffffff;color:#0f172a;font-family:Georgia,'Times New Roman',serif;font-size:11px;line-height:1.45;box-sizing:border-box;z-index:2147483646;opacity:1;visibility:visible;display:block;";
+      nodes.forEach(function (n) {
+        host.appendChild(n.cloneNode(true));
+      });
+      document.body.appendChild(host);
+      void host.offsetHeight;
+      return host;
+    }
+
+    var shell = document.createElement("div");
+    shell.innerHTML = scratchHtml;
+    var kids = Array.prototype.slice.call(shell.childNodes).filter(function (n) {
+      return n.nodeType === 1;
+    });
+    var mid = Math.ceil(kids.length / 2);
+    var partA = kids.slice(0, mid);
+    var partB = kids.slice(mid);
+
+    var hostA = buildPartialHost(partA);
+    await waitTwoFrames_();
+    var capA = await captureHostCanvas_(hostA, 1);
+    cleanupPdfHost_(hostA);
+
+    var hostB = buildPartialHost(partB);
+    await waitTwoFrames_();
+    var capB = await captureHostCanvas_(hostB, 1);
+    cleanupPdfHost_(hostB);
+
+    function addCanvasPages(canvas, isFirst) {
+      var imgW = usableW;
+      var imgH = (canvas.height * imgW) / canvas.width;
+      var imgData = canvas.toDataURL("image/jpeg", 0.95);
+      var pageH = pdf.internal.pageSize.getHeight();
+      var usableH = pageH - margin * 2;
+      var heightLeft = imgH;
+      var y = margin;
+      if (!isFirst) pdf.addPage();
+      pdf.addImage(imgData, "JPEG", margin, y, imgW, imgH);
+      heightLeft -= usableH;
+      while (heightLeft > 0.5) {
+        y = margin - (imgH - heightLeft);
+        pdf.addPage();
+        pdf.addImage(imgData, "JPEG", margin, y, imgW, imgH);
+        heightLeft -= usableH;
+      }
+    }
+
+    if (capA.nonWhite < 5 && capB.nonWhite < 5) {
+      throw new Error(
+        "Canvas do contrato ficou branco mesmo em 2 partes (scale 1). nonWhite A/B=" +
+          capA.nonWhite +
+          "/" +
+          capB.nonWhite
+      );
+    }
+
+    addCanvasPages(capA.canvas, true);
+    addCanvasPages(capB.canvas, false);
+    console.info("[pdf-contrato] usou captura em 2 partes (split)");
+    return pdf.output("datauristring");
+  }
+
+  function buildContratoPdfHost_() {
+    if (
+      typeof window.html2canvas !== "function" &&
+      typeof window.html2pdf !== "function"
+    ) {
+      return null;
+    }
+
+    var article = modalContrato
+      ? modalContrato.querySelector("#contract-article") ||
+        modalContrato.querySelector(".contract__text")
       : null;
-    if (!article || typeof window.html2pdf !== "function") return null;
+    if (!article) return null;
 
     fillContractPlaceholders();
     if (assinaturaOk && assinaturaDataUrl && assinaturaImg) {
@@ -740,69 +962,194 @@
       assinaturaImg.hidden = false;
     }
 
-    const wrapper = document.createElement("div");
-    wrapper.setAttribute("aria-hidden", "true");
-    wrapper.style.cssText =
-      "position:fixed;left:-10000px;top:0;width:720px;padding:28px 32px;background:#ffffff;color:#0f172a;font-family:Georgia,'Times New Roman',serif;line-height:1.55;font-size:12px;";
-    const clone = article.cloneNode(true);
-    clone.style.color = "#0f172a";
+    var scratch = document.createElement("div");
+    scratch.innerHTML = article.innerHTML;
 
-    // No PDF: mostra a imagem da assinatura e remove canvas/botões
-    const cloneCanvas = clone.querySelector("#assinatura-canvas");
-    if (cloneCanvas) cloneCanvas.remove();
-    const cloneImg = clone.querySelector("#assinatura-img");
-    if (cloneImg && assinaturaDataUrl) {
-      cloneImg.src = assinaturaDataUrl;
-      cloneImg.hidden = false;
-      cloneImg.style.display = "block";
-      cloneImg.style.width = "100%";
-      cloneImg.style.maxWidth = "420px";
-      cloneImg.style.height = "auto";
-      cloneImg.style.borderBottom = "1px solid #94a3b8";
+    scratch
+      .querySelectorAll(
+        "canvas, button, #limpar-assinatura, #assinatura-hint, .signature-block__hint"
+      )
+      .forEach(function (n) {
+        n.remove();
+      });
+
+    var img = scratch.querySelector("#assinatura-img, img.signature-img");
+    if (img && assinaturaDataUrl) {
+      img.removeAttribute("hidden");
+      img.setAttribute("src", assinaturaDataUrl);
+      img.setAttribute(
+        "style",
+        "display:block;width:420px;max-width:100%;height:120px;object-fit:contain;object-position:left bottom;margin:8px 0 4px;border-bottom:1px solid #94a3b8;background:#ffffff;"
+      );
+    } else if (img) {
+      img.remove();
     }
-    const cloneClear = clone.querySelector("#limpar-assinatura");
-    if (cloneClear) cloneClear.remove();
-    const cloneHint = clone.querySelector("#assinatura-hint");
-    if (cloneHint) cloneHint.remove();
 
-    wrapper.appendChild(clone);
-    document.body.appendChild(wrapper);
+    var sigWrap = scratch.querySelector(".signature-pad-wrap");
+    if (sigWrap) {
+      sigWrap.setAttribute(
+        "style",
+        "border:none;padding:0;margin:0;background:#ffffff;min-height:120px;"
+      );
+    }
+    var sigBlock = scratch.querySelector(".signature-block");
+    if (sigBlock) {
+      sigBlock.setAttribute(
+        "style",
+        "margin-top:18px;padding-top:12px;border-top:1px solid #cbd5e1;"
+      );
+    }
 
-    const worker = window
-      .html2pdf()
-      .set({
-        margin: [12, 12, 12, 12],
-        filename: "contrato-escolinha-futsal.pdf",
-        image: { type: "jpeg", quality: 0.95 },
-        html2canvas: { scale: 1.6, useCORS: true, backgroundColor: "#ffffff" },
-        jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-        pagebreak: { mode: ["css", "legacy"] },
-      })
-      .from(wrapper);
+    scratch.querySelectorAll("h4").forEach(function (el) {
+      el.setAttribute(
+        "style",
+        "margin:0 0 10px;font-size:14px;font-weight:700;color:#0f172a;font-family:Georgia,'Times New Roman',serif;"
+      );
+    });
+    scratch.querySelectorAll("h5").forEach(function (el) {
+      el.setAttribute(
+        "style",
+        "margin:12px 0 4px;font-size:12px;font-weight:700;color:#0f172a;font-family:Georgia,'Times New Roman',serif;"
+      );
+    });
+    scratch.querySelectorAll("p, li").forEach(function (el) {
+      el.setAttribute(
+        "style",
+        "margin:0 0 6px;font-size:11px;line-height:1.45;color:#0f172a;font-family:Georgia,'Times New Roman',serif;"
+      );
+    });
+    scratch.querySelectorAll("ul").forEach(function (el) {
+      el.setAttribute("style", "margin:0 0 8px;padding-left:18px;color:#0f172a;");
+    });
 
-    return { worker, wrapper };
+    var texto = String(scratch.innerText || "").replace(/\s+/g, " ").trim();
+    console.info(
+      "[pdf-contrato] texto=",
+      texto.length,
+      "html=",
+      String(scratch.innerHTML || "").length
+    );
+    if (texto.length < 200) {
+      throw new Error(
+        "HTML do contrato veio vazio no PDF (texto=" +
+          texto.length +
+          "). Abra o contrato, assine e tente de novo."
+      );
+    }
+
+    var host = document.createElement("div");
+    host.id = "pdf-contrato-host";
+    host.setAttribute("aria-hidden", "true");
+    host.style.cssText = [
+      "position:fixed",
+      "left:0",
+      "top:0",
+      "width:794px",
+      "padding:16px 20px",
+      "margin:0",
+      "background:#ffffff",
+      "color:#0f172a",
+      "font-family:Georgia,'Times New Roman',serif",
+      "font-size:11px",
+      "line-height:1.45",
+      "box-sizing:border-box",
+      "z-index:2147483646",
+      "opacity:1",
+      "visibility:visible",
+      "display:block",
+      "overflow:visible",
+      "height:auto",
+      "max-height:none",
+      "pointer-events:none",
+    ].join(";");
+    host.innerHTML = scratch.innerHTML;
+    host._scratchHtml = scratch.innerHTML;
+
+    document.body.appendChild(host);
+    void host.offsetHeight;
+    console.info(
+      "[pdf-contrato] host size=",
+      host.offsetWidth,
+      "x",
+      host.offsetHeight
+    );
+    if (host.offsetHeight < 80) {
+      cleanupPdfHost_(host);
+      throw new Error(
+        "Host do PDF com altura zero (" + host.offsetHeight + "px)."
+      );
+    }
+
+    return host;
+  }
+
+  async function renderContratoPdfDataUri_(host) {
+    await waitTwoFrames_();
+
+    var cap = await captureHostCanvas_(host, 1);
+
+    if (!cap.probe || cap.probe.indexOf("data:image") !== 0) {
+      throw new Error(
+        "toDataURL não retornou data:image (prefix=" +
+          String(cap.probe || "").slice(0, 40) +
+          ")"
+      );
+    }
+
+    if (cap.nonWhite >= 5) {
+      console.info("[pdf-contrato] approach=scale1+jsPDF-slice OK");
+      return canvasToMultiPagePdfDataUri_(cap.canvas);
+    }
+
+    console.warn(
+      "[pdf-contrato] canvas scale1 quase branco; tentando split 2 partes"
+    );
+    var html = host._scratchHtml || host.innerHTML;
+    cleanupPdfHost_(host);
+    host._cleanedEarly = true;
+    return await captureContratoSplitPdf_(html);
   }
 
   async function downloadContrato() {
-    const downloadBtn = document.getElementById("download-contrato");
-    const built = buildContratoPdfWorker();
-    if (!built) {
-      setStatus("Não foi possível gerar o PDF agora. Recarregue a página e tente de novo.");
-      return;
-    }
-
+    var downloadBtn = document.getElementById("download-contrato");
+    var host = null;
     if (downloadBtn) {
       downloadBtn.disabled = true;
       setButtonLabel(downloadBtn, "Gerando PDF...");
     }
 
     try {
-      await built.worker.save();
+      host = buildContratoPdfHost_();
+      if (!host) {
+        setStatus(
+          "Falha ao montar o PDF: biblioteca html2canvas/jsPDF indisponível."
+        );
+        return;
+      }
+      var dataUri = await renderContratoPdfDataUri_(host);
+      if (host._cleanedEarly) host = null;
+      var comma = dataUri.indexOf(",");
+      var b64 = comma >= 0 ? dataUri.slice(comma + 1) : dataUri;
+      var bytes = Uint8Array.from(atob(b64), function (c) {
+        return c.charCodeAt(0);
+      });
+      var blob = new Blob([bytes], { type: "application/pdf" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "contrato-monteiro-lobato-futsal.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     } catch (error) {
       console.error(error);
-      setStatus("Não foi possível baixar o contrato em PDF. Tente novamente.");
+      setStatus(
+        "Falha ao baixar o PDF: " +
+          (error && error.message ? error.message : String(error))
+      );
     } finally {
-      built.wrapper.remove();
+      if (host && !host._cleanedEarly) cleanupPdfHost_(host);
       if (downloadBtn) {
         downloadBtn.disabled = false;
         setButtonLabel(downloadBtn, "Baixar contrato");
@@ -812,17 +1159,29 @@
 
   /** Gera PDF do contrato preenchido e devolve base64 (sem prefixo data:). */
   async function generateContratoPdfBase64() {
-    const built = buildContratoPdfWorker();
-    if (!built) return "";
+    var host = buildContratoPdfHost_();
+    if (!host) {
+      throw new Error(
+        "Não foi possível montar o HTML do contrato para PDF (html2canvas/jsPDF)."
+      );
+    }
     try {
-      const dataUri = await built.worker.outputPdf("datauristring");
-      const comma = String(dataUri).indexOf(",");
-      return comma >= 0 ? String(dataUri).slice(comma + 1) : String(dataUri);
+      var dataUri = await renderContratoPdfDataUri_(host);
+      if (host._cleanedEarly) host = null;
+      var comma = String(dataUri).indexOf(",");
+      var b64 =
+        comma >= 0 ? String(dataUri).slice(comma + 1) : String(dataUri);
+      if (!b64 || b64.length < 64) {
+        throw new Error("PDF gerado vazio ou inválido (base64 curto).");
+      }
+      return b64;
     } catch (error) {
       console.error(error);
-      return "";
+      throw error instanceof Error
+        ? error
+        : new Error(String(error || "Falha desconhecida ao gerar PDF"));
     } finally {
-      built.wrapper.remove();
+      if (host && !host._cleanedEarly) cleanupPdfHost_(host);
     }
   }
 
@@ -1153,6 +1512,14 @@
       contratoPdfBase64 = await generateContratoPdfBase64();
     } catch (error) {
       console.error(error);
+      setStatus(
+        "Falha ao gerar o PDF do contrato: " +
+          (error && error.message ? error.message : String(error)) +
+          " Abra o contrato, confira a assinatura e tente de novo."
+      );
+      submitBtn.disabled = false;
+      setButtonLabel(submitBtn, "Continuar");
+      return;
     }
 
     const payload = {
@@ -1217,10 +1584,19 @@
         throw new Error("HTTP " + response.status);
       }
 
+      if (result && !result.contrato_pdf_url) {
+        throw new Error(
+          "Cadastro sem link do PDF no Drive. O contrato não foi confirmado — tente de novo."
+        );
+      }
+
       showSuccess(data, plano);
     } catch (error) {
       console.error(error);
-      setStatus("Não foi possível salvar na planilha. Confira a URL do Apps Script.");
+      setStatus(
+        "Não foi possível concluir o cadastro: " +
+          (error && error.message ? error.message : String(error))
+      );
     } finally {
       submitBtn.disabled = false;
       setButtonLabel(submitBtn, "Continuar");
