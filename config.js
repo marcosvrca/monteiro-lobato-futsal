@@ -8,6 +8,9 @@ window.NDF_CONFIG = {
   // Mesma URL /exec do ndf-futsal → mesma planilha Google Sheets
   GOOGLE_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbxOOL0z3kU6nu1GDThQulT5L5OmQnVsk63VT5xcozQj9nJOuTDufDxCAT2stRuNJ53Ipg/exec",
 
+  // WhatsApp do responsável pela escolinha (somente dígitos com DDI)
+  WHATSAPP_ESCOLINHA: "556381150191",
+
   // Fallback (não usado se a unidade tiver `planos` próprio)
   PLANOS: [],
 
