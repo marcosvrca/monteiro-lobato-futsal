@@ -6,7 +6,7 @@
  */
 window.NDF_CONFIG = {
   // Mesma URL /exec do ndf-futsal → mesma planilha Google Sheets
-  GOOGLE_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbzC7UYY24Q6Bjm-y5nrBw7BnzvSuRytuoi46MNKRf60Q1pAjRBJYx5m8TOYooMBlFvaHw/exec",
+  GOOGLE_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbxOOL0z3kU6nu1GDThQulT5L5OmQnVsk63VT5xcozQj9nJOuTDufDxCAT2stRuNJ53Ipg/exec",
 
   // Fallback (não usado se a unidade tiver `planos` próprio)
   PLANOS: [],
